@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rapidrtmp
+  labels:
+    app: rapidrtmp
+spec:
+  selector:
+    matchLabels:
+      app: rapidrtmp
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+

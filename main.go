@@ -6,6 +6,7 @@ import (
 	"rapidrtmp/config"
 	"rapidrtmp/httpServer"
 	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/metrics"
 	"rapidrtmp/internal/rtmp"
 	"rapidrtmp/internal/segmenter"
 	"rapidrtmp/internal/storage"
@@ -28,6 +29,10 @@ func main() {
 	}
 	log.Printf("Storage initialized: %s", localStorage.GetFullPath(""))
 
+	// Initialize metrics
+	m := metrics.New()
+	log.Println("Prometheus metrics initialized")
+
 	// Initialize managers
 	streamManager := streammanager.New()
 	authManager := auth.New()
@@ -38,7 +43,7 @@ func main() {
 	log.Println("HLS segmenter initialized")
 
 	// Initialize HTTP server
-	httpSrv := httpServer.New(streamManager, authManager, seg, cfg.RTMPIngestAddr)
+	httpSrv := httpServer.New(streamManager, authManager, seg, m, cfg.RTMPIngestAddr)
 	log.Printf("HTTP server ready to start on %s", cfg.HTTPAddr)
 
 	// Initialize RTMP ingest server

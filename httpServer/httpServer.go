@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/metrics"
 	"rapidrtmp/internal/segmenter"
 	"rapidrtmp/internal/streammanager"
 	"rapidrtmp/pkg/models"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server wraps the HTTP server with dependencies
@@ -21,15 +23,17 @@ type Server struct {
 	streamManager  *streammanager.Manager
 	authManager    *auth.Manager
 	segmenter      *segmenter.Segmenter
+	metrics        *metrics.Metrics
 	rtmpIngestAddr string // e.g., "rtmp://localhost:1935"
 }
 
 // New creates a new HTTP server
-func New(streamManager *streammanager.Manager, authManager *auth.Manager, seg *segmenter.Segmenter, rtmpIngestAddr string) *Server {
+func New(streamManager *streammanager.Manager, authManager *auth.Manager, seg *segmenter.Segmenter, m *metrics.Metrics, rtmpIngestAddr string) *Server {
 	s := &Server{
 		streamManager:  streamManager,
 		authManager:    authManager,
 		segmenter:      seg,
+		metrics:        m,
 		rtmpIngestAddr: rtmpIngestAddr,
 	}
 
@@ -40,6 +44,14 @@ func New(streamManager *streammanager.Manager, authManager *auth.Manager, seg *s
 // setupRoutes configures all HTTP routes
 func (s *Server) setupRoutes() {
 	router := gin.Default()
+
+	// Add metrics middleware
+	router.Use(s.metricsMiddleware())
+
+	// Observability endpoints
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	router.GET("/health", s.handleHealth)
+	router.GET("/ready", s.handleReady)
 
 	api := router.Group("/api")
 	{
@@ -65,7 +77,73 @@ func (s *Server) Run(addr string) error {
 	return s.router.Run(addr)
 }
 
+// Middleware
+
+// metricsMiddleware records HTTP request metrics
+func (s *Server) metricsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s.metrics == nil {
+			c.Next()
+			return
+		}
+
+		start := time.Now()
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+
+		c.Next()
+
+		duration := time.Since(start).Seconds()
+		status := c.Writer.Status()
+		method := c.Request.Method
+
+		s.metrics.RecordHTTPRequest(method, path, status, duration)
+	}
+}
+
 // Handler implementations
+
+func (s *Server) handleHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status": "healthy",
+		"time":   time.Now().Unix(),
+	})
+}
+
+func (s *Server) handleReady(c *gin.Context) {
+	// Check if critical components are ready
+	ready := true
+	checks := make(map[string]string)
+
+	// Check stream manager
+	if s.streamManager != nil {
+		checks["streamManager"] = "ok"
+	} else {
+		checks["streamManager"] = "not initialized"
+		ready = false
+	}
+
+	// Check segmenter
+	if s.segmenter != nil {
+		checks["segmenter"] = "ok"
+	} else {
+		checks["segmenter"] = "not initialized"
+		ready = false
+	}
+
+	status := http.StatusOK
+	if !ready {
+		status = http.StatusServiceUnavailable
+	}
+
+	c.JSON(status, gin.H{
+		"ready":  ready,
+		"checks": checks,
+		"time":   time.Now().Unix(),
+	})
+}
 
 func (s *Server) handlePing(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{

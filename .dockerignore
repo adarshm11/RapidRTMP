@@ -1,0 +1,26 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+rapidrtmp
+*.exe
+*.test
+*.out
+
+# Data
+data/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Documentation
+README.md
+TESTING.md
+

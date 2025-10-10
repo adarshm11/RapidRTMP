@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rapidrtmp
+  labels:
+    app: rapidrtmp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rapidrtmp
+  template:
+    metadata:
+      labels:
+        app: rapidrtmp
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: rapidrtmp
+        image: rapidrtmp:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: rtmp
+          containerPort: 1935
+          protocol: TCP
+        env:
+        - name: HTTP_ADDR
+          value: ":8080"
+        - name: RTMP_ADDR
+          value: ":1935"
+        - name: RTMP_INGEST_ADDR
+          value: "rtmp://rapidrtmp:1935"
+        - name: STORAGE_DIR
+          value: "/app/data/streams"
+        - name: HLS_SEGMENT_DURATION
+          value: "2s"
+        - name: HLS_MAX_SEGMENTS
+          value: "10"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: data
+        emptyDir: {}
+
