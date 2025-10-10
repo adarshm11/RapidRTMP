@@ -27,6 +27,7 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 - ✅ **Health Checks** - Kubernetes-ready health and readiness endpoints
 - ✅ **Docker Support** - Production-ready containerization
 - ✅ **Kubernetes Manifests** - Complete K8s deployment configs
+- ✅ **Google Cloud Storage** - Production storage backend with CDN support
 
 **What's Working:**
 - ✅ **Accept RTMP streams** from OBS Studio and FFmpeg
@@ -46,13 +47,16 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 - ✅ **Docker containerization** with multi-stage builds
 - ✅ **Kubernetes deployment** manifests
 - ✅ **Metrics middleware** for HTTP request tracking
+- ✅ **GCS storage backend** with signed URLs and CDN integration
 
 **Future Enhancements:**
 - 🔨 Proper fMP4/CMAF muxing (currently simplified)
 - 🔨 Multi-bitrate transcoding (ABR)
 - 🔨 WebRTC gateway for sub-second latency
-- 🔨 DVR/VOD support with S3 backend
-- 🔨 CDN integration (CloudFront/Fastly)
+- 🔨 DVR/VOD support
+- 🔨 AWS S3 storage backend
+- 🔨 Azure Blob Storage backend
+- 🔨 CloudFront/Fastly CDN integration
 - 🔨 Distributed tracing (OpenTelemetry)
 
 ## 📋 Requirements

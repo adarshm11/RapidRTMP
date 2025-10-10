@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"rapidrtmp/config"
@@ -23,11 +24,31 @@ func main() {
 	log.Printf("Storage Directory: %s", cfg.StorageDir)
 
 	// Initialize storage
-	localStorage, err := storage.NewLocalStorage(cfg.StorageDir)
-	if err != nil {
-		log.Fatalf("Failed to initialize storage: %v", err)
+	var storageBackend storage.Storage
+	
+	if cfg.StorageType == "gcs" {
+		// Initialize GCS storage
+		if cfg.GCSProjectID == "" || cfg.GCSBucketName == "" {
+			log.Fatal("GCS_PROJECT_ID and GCS_BUCKET_NAME must be set when STORAGE_TYPE=gcs")
+		}
+		
+		ctx := context.Background()
+		gcsStorage, err := storage.NewGCSStorage(ctx, cfg.GCSProjectID, cfg.GCSBucketName, cfg.GCSBaseDir)
+		if err != nil {
+			log.Fatalf("Failed to initialize GCS storage: %v", err)
+		}
+		storageBackend = gcsStorage
+		log.Printf("Storage initialized: GCS bucket=%s, project=%s, baseDir=%s", 
+			cfg.GCSBucketName, cfg.GCSProjectID, cfg.GCSBaseDir)
+	} else {
+		// Initialize local storage (default)
+		localStorage, err := storage.NewLocalStorage(cfg.StorageDir)
+		if err != nil {
+			log.Fatalf("Failed to initialize local storage: %v", err)
+		}
+		storageBackend = localStorage
+		log.Printf("Storage initialized: Local directory=%s", cfg.StorageDir)
 	}
-	log.Printf("Storage initialized: %s", localStorage.GetFullPath(""))
 
 	// Initialize metrics
 	m := metrics.New()
@@ -39,7 +60,7 @@ func main() {
 	log.Println("Stream manager and auth manager initialized")
 
 	// Initialize segmenter
-	seg := segmenter.New(localStorage, streamManager)
+	seg := segmenter.New(storageBackend, streamManager)
 	log.Println("HLS segmenter initialized")
 
 	// Initialize HTTP server
