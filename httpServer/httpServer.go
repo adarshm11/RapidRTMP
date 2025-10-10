@@ -1,54 +1,222 @@
 package httpServer
 
 import (
+	"fmt"
+	"net/http"
+	"time"
+
+	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/streammanager"
+	"rapidrtmp/pkg/models"
+
 	"github.com/gin-gonic/gin"
 )
 
-func SetupRouter() *gin.Engine {
+// Server wraps the HTTP server with dependencies
+type Server struct {
+	router         *gin.Engine
+	streamManager  *streammanager.Manager
+	authManager    *auth.Manager
+	rtmpIngestAddr string // e.g., "rtmp://localhost:1935"
+}
+
+// New creates a new HTTP server
+func New(streamManager *streammanager.Manager, authManager *auth.Manager, rtmpIngestAddr string) *Server {
+	s := &Server{
+		streamManager:  streamManager,
+		authManager:    authManager,
+		rtmpIngestAddr: rtmpIngestAddr,
+	}
+
+	s.setupRoutes()
+	return s
+}
+
+// setupRoutes configures all HTTP routes
+func (s *Server) setupRoutes() {
 	router := gin.Default()
 
-	api := router.Group("/api") // main api endpoints
+	api := router.Group("/api")
 	{
-
-		api.GET("/ping", func(c *gin.Context) {
-			c.JSON(200, gin.H{
-				"message": "pong",
-			})
-		})
-
-		api.POST("/v1/publish", func(c *gin.Context) {
-			// request a short-lived publish token
-			// request: { "streamKey": "myshow", "expiresIn"; 3600 }
-			// response: { "publishUrl": "trmp://ingest.example.com/live/myshow?token=..." }
-		})
-
-		api.GET("/v1/streams", func(c *gin.Context) {
-			// list live streams
-		})
-
-		api.GET("/v1/streams/:streamKey", func(c *gin.Context) {
-			// stream metadata
-		})
-
-		api.POST("/v1/streams/:streamKey/stop", func(c *gin.Context) {
-			// force stop
-		})
+		api.GET("/ping", s.handlePing)
+		api.POST("/v1/publish", s.handlePublish)
+		api.GET("/v1/streams", s.handleListStreams)
+		api.GET("/v1/streams/:streamKey", s.handleGetStream)
+		api.POST("/v1/streams/:streamKey/stop", s.handleStopStream)
 	}
 
-	live := router.Group("/live") // live streaming endpoints
+	live := router.Group("/live")
 	{
-		live.GET("/:streamKey/index.m3u8", func(c *gin.Context) {
-			// serve HLS playlist
-		})
-
-		live.GET("/:streamKey/init.mp4", func(c *gin.Context) {
-			// serve mp4 init segment
-		})
-
-		live.GET("/:streamKey/:segment.m4s", func(c *gin.Context) {
-			// serve mp4 media segment
-		})
+		live.GET("/:streamKey/index.m3u8", s.handlePlaylist)
+		live.GET("/:streamKey/init.mp4", s.handleInitSegment)
+		live.GET("/:streamKey/:segment.m4s", s.handleMediaSegment)
 	}
 
-	return router
+	s.router = router
+}
+
+// Run starts the HTTP server
+func (s *Server) Run(addr string) error {
+	return s.router.Run(addr)
+}
+
+// Handler implementations
+
+func (s *Server) handlePing(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "pong",
+		"time":    time.Now().Unix(),
+	})
+}
+
+func (s *Server) handlePublish(c *gin.Context) {
+	var req models.PublishRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Default expiration to 1 hour
+	if req.ExpiresIn == 0 {
+		req.ExpiresIn = 3600
+	}
+
+	// Generate publish token
+	clientIP := c.ClientIP()
+	token, err := s.authManager.GeneratePublishToken(req.StreamKey, req.ExpiresIn, clientIP)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	// Build publish URL
+	publishURL := fmt.Sprintf("%s/live/%s?token=%s", s.rtmpIngestAddr, req.StreamKey, token.Token)
+
+	c.JSON(http.StatusOK, models.PublishResponse{
+		PublishURL: publishURL,
+		StreamKey:  req.StreamKey,
+		Token:      token.Token,
+		ExpiresAt:  token.ExpiresAt.Format(time.RFC3339),
+	})
+}
+
+func (s *Server) handleListStreams(c *gin.Context) {
+	streams := s.streamManager.GetLiveStreams()
+
+	streamInfos := make([]models.StreamInfo, len(streams))
+	for i, stream := range streams {
+		streamInfos[i] = s.streamToInfo(stream)
+	}
+
+	c.JSON(http.StatusOK, models.StreamListResponse{
+		Streams: streamInfos,
+		Total:   len(streamInfos),
+	})
+}
+
+func (s *Server) handleGetStream(c *gin.Context) {
+	streamKey := c.Param("streamKey")
+
+	stream, exists := s.streamManager.GetStream(streamKey)
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, s.streamToInfo(stream))
+}
+
+func (s *Server) handleStopStream(c *gin.Context) {
+	streamKey := c.Param("streamKey")
+
+	err := s.streamManager.StopStream(streamKey)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "stream stopped",
+		"streamKey": streamKey,
+	})
+}
+
+func (s *Server) handlePlaylist(c *gin.Context) {
+	streamKey := c.Param("streamKey")
+
+	stream, exists := s.streamManager.GetStream(streamKey)
+	if !exists || stream.GetState() != models.StreamStateLive {
+		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found or not live"})
+		return
+	}
+
+	// TODO: Serve actual HLS playlist
+	// For now, return a placeholder
+	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte("#EXTM3U\n#EXT-X-VERSION:7\n"))
+}
+
+func (s *Server) handleInitSegment(c *gin.Context) {
+	streamKey := c.Param("streamKey")
+
+	stream, exists := s.streamManager.GetStream(streamKey)
+	if !exists || stream.GetState() != models.StreamStateLive {
+		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found or not live"})
+		return
+	}
+
+	// TODO: Serve actual init segment
+	c.JSON(http.StatusNotImplemented, gin.H{"error": "init segment not implemented yet"})
+}
+
+func (s *Server) handleMediaSegment(c *gin.Context) {
+	streamKey := c.Param("streamKey")
+	segment := c.Param("segment")
+
+	stream, exists := s.streamManager.GetStream(streamKey)
+	if !exists || stream.GetState() != models.StreamStateLive {
+		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found or not live"})
+		return
+	}
+
+	// TODO: Serve actual media segment
+	c.JSON(http.StatusNotImplemented, gin.H{"error": fmt.Sprintf("segment %s not implemented yet", segment)})
+}
+
+// Helper functions
+
+func (s *Server) streamToInfo(stream *models.Stream) models.StreamInfo {
+	info := models.StreamInfo{
+		StreamKey: stream.Key,
+		Active:    stream.GetState() == models.StreamStateLive,
+		State:     string(stream.GetState()),
+		Viewers:   stream.GetViewerCount(),
+		Metadata:  stream.Metadata,
+	}
+
+	if !stream.StartedAt.IsZero() {
+		info.StartedAt = stream.StartedAt.Format(time.RFC3339)
+		info.Duration = int(time.Since(stream.StartedAt).Seconds())
+	}
+
+	if stream.VideoCodec != nil {
+		info.VideoCodec = stream.VideoCodec.Codec
+		info.Resolution = fmt.Sprintf("%dx%d", stream.VideoCodec.Width, stream.VideoCodec.Height)
+		info.Bitrate = stream.VideoCodec.Bitrate
+	}
+
+	if stream.AudioCodec != nil {
+		info.AudioCodec = stream.AudioCodec.Codec
+	}
+
+	return info
+}
+
+// Legacy function for backward compatibility
+func SetupRouter() *gin.Engine {
+	// Create default dependencies
+	streamManager := streammanager.New()
+	authManager := auth.New()
+
+	server := New(streamManager, authManager, "rtmp://localhost:1935")
+	return server.router
 }
