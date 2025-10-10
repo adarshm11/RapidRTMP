@@ -4,26 +4,32 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 
 ## 🚀 Current Status
 
-**Phase 1: Core Infrastructure** ✅ **COMPLETE**
+**Phase 1: Core Infrastructure** ✅ **COMPLETE**  
+**Phase 2: RTMP Ingest** ✅ **COMPLETE**
 
-The following components are implemented and working:
+### Implemented Features:
 
 - ✅ **HTTP API Server** - REST API for stream management
+- ✅ **RTMP Ingest Server** - Accept live streams from OBS/FFmpeg on port 1935
 - ✅ **Stream Manager** - In-memory stream registry with pub/sub
 - ✅ **Auth Manager** - Token-based authentication for publishers
 - ✅ **Storage Layer** - Local filesystem storage (S3 ready)
 - ✅ **Data Models** - Complete type system for streams, frames, segments
 - ✅ **Configuration** - Environment-based config management
+- ✅ **Frame Processing** - Extract H.264 video and AAC audio frames
+- ✅ **Publisher Authentication** - Validate tokens from OBS/FFmpeg
 
 **What's Working:**
-- Generate publish tokens via API
-- List active streams
-- Get stream metadata
-- Stop streams remotely
-- Health check endpoint
+- ✅ Accept RTMP streams from OBS Studio and FFmpeg
+- ✅ Generate publish tokens via API
+- ✅ Real-time frame extraction (video/audio)
+- ✅ List active streams with metadata
+- ✅ Get stream info (codec, resolution, bitrate)
+- ✅ Stop streams remotely
+- ✅ Track stream statistics (frames, viewers, dropped frames)
+- ✅ Health check endpoint
 
-**What's Next (Phase 2):**
-- 🔨 RTMP Ingest Server (accept streams from OBS/FFmpeg)
+**What's Next (Phase 3):**
 - 🔨 Remuxer (RTMP → fMP4/CMAF conversion)
 - 🔨 HLS Segmenter (generate playlists and segments)
 - 🔨 HLS Playback (serve to viewers)
@@ -224,7 +230,40 @@ RapidRTMP/
 
 ## 🧪 Testing
 
-### Test the API
+### Quick Start
+
+```bash
+# 1. Start the server
+./rapidrtmp
+
+# 2. Generate a publish token
+curl -X POST http://localhost:8080/api/v1/publish \
+  -H "Content-Type: application/json" \
+  -d '{"streamKey":"test","expiresIn":3600}'
+
+# 3. Stream with FFmpeg (test pattern)
+ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
+  -f lavfi -i sine=frequency=1000 \
+  -c:v libx264 -preset veryfast -b:v 2500k \
+  -c:a aac -b:a 128k \
+  -f flv "rtmp://localhost:1935/live/test?token=YOUR_TOKEN_HERE"
+
+# 4. Check active streams
+curl http://localhost:8080/api/v1/streams
+```
+
+### Test with OBS Studio
+
+1. Generate a token via API
+2. In OBS: Settings → Stream
+3. Service: Custom
+4. Server: `rtmp://localhost:1935/live`
+5. Stream Key: `your-stream-key?token=YOUR_TOKEN`
+6. Click "Start Streaming"
+
+**See [TESTING.md](TESTING.md) for comprehensive testing guide.**
+
+### API Testing
 
 ```bash
 # Health check
@@ -256,12 +295,13 @@ curl -X POST http://localhost:8080/api/v1/streams/test/stop
 - [x] HTTP API
 - [x] Configuration
 
-### Phase 2: RTMP Ingest (In Progress)
-- [ ] RTMP server (TCP listener)
-- [ ] RTMP protocol parser
-- [ ] H.264/AAC frame extraction
-- [ ] Publisher authentication
-- [ ] Integration with stream manager
+### Phase 2: RTMP Ingest ✅ **COMPLETE**
+- [x] RTMP server (TCP listener on port 1935)
+- [x] RTMP protocol parser (using go-rtmp library)
+- [x] H.264/AAC frame extraction
+- [x] Publisher authentication via tokens
+- [x] Integration with stream manager
+- [x] Frame pub/sub to downstream consumers
 
 ### Phase 3: HLS Packaging
 - [ ] Remuxer (RTMP → fMP4)

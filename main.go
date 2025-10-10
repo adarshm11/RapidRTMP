@@ -6,6 +6,7 @@ import (
 	"rapidrtmp/config"
 	"rapidrtmp/httpServer"
 	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/rtmp"
 	"rapidrtmp/internal/storage"
 	"rapidrtmp/internal/streammanager"
 )
@@ -35,9 +36,14 @@ func main() {
 	httpSrv := httpServer.New(streamManager, authManager, cfg.RTMPIngestAddr)
 	log.Printf("HTTP server ready to start on %s", cfg.HTTPAddr)
 
-	// TODO: Initialize RTMP ingest server
-	// rtmpSrv := rtmp.New(cfg.RTMPAddr, streamManager, authManager)
-	// go rtmpSrv.ListenAndServe()
+	// Initialize RTMP ingest server
+	rtmpSrv := rtmp.New(cfg.RTMPAddr, streamManager, authManager)
+	go func() {
+		log.Printf("Starting RTMP ingest server on %s...", cfg.RTMPAddr)
+		if err := rtmpSrv.ListenAndServe(); err != nil {
+			log.Fatalf("RTMP server failed: %v", err)
+		}
+	}()
 
 	log.Println("RapidRTMP server started successfully")
 	log.Println("---")
