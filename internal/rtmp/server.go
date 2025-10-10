@@ -11,6 +11,7 @@ import (
 	rtmpmsg "github.com/yutopp/go-rtmp/message"
 
 	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/segmenter"
 	"rapidrtmp/internal/streammanager"
 	"rapidrtmp/pkg/models"
 )
@@ -20,16 +21,18 @@ type Server struct {
 	addr          string
 	streamManager *streammanager.Manager
 	authManager   *auth.Manager
+	segmenter     *segmenter.Segmenter
 	server        *rtmp.Server
 	mu            sync.RWMutex
 }
 
 // New creates a new RTMP server
-func New(addr string, streamManager *streammanager.Manager, authManager *auth.Manager) *Server {
+func New(addr string, streamManager *streammanager.Manager, authManager *auth.Manager, seg *segmenter.Segmenter) *Server {
 	s := &Server{
 		addr:          addr,
 		streamManager: streamManager,
 		authManager:   authManager,
+		segmenter:     seg,
 	}
 
 	// Create RTMP server with handler
@@ -62,6 +65,7 @@ func (s *Server) onConnect(conn net.Conn) (io.ReadWriteCloser, *rtmp.ConnConfig)
 		server:        s,
 		streamManager: s.streamManager,
 		authManager:   s.authManager,
+		segmenter:     s.segmenter,
 		conn:          conn,
 	}
 
@@ -89,6 +93,7 @@ type ConnHandler struct {
 	server        *Server
 	streamManager *streammanager.Manager
 	authManager   *auth.Manager
+	segmenter     *segmenter.Segmenter
 	conn          net.Conn
 	streamKey     string
 	stream        *models.Stream
@@ -156,6 +161,15 @@ func (h *ConnHandler) OnPublish(ctx *rtmp.StreamContext, timestamp uint32, cmd *
 
 	h.stream = stream
 	stream.SetState(models.StreamStateLive)
+
+	// Start HLS segmentation for this stream
+	if h.segmenter != nil {
+		if err := h.segmenter.StartSegmenting(streamKey); err != nil {
+			log.Printf("Failed to start segmentation for stream %s: %v", streamKey, err)
+		} else {
+			log.Printf("Started HLS segmentation for stream %s", streamKey)
+		}
+	}
 
 	log.Printf("Stream %s is now live from %s", streamKey, clientIP)
 
@@ -270,6 +284,12 @@ func (h *ConnHandler) OnClose() {
 
 	if h.stream != nil && h.streamKey != "" {
 		log.Printf("Stopping stream %s", h.streamKey)
+		
+		// Stop segmentation
+		if h.segmenter != nil {
+			h.segmenter.StopSegmenting(h.streamKey)
+		}
+		
 		h.streamManager.StopStream(h.streamKey)
 	}
 }

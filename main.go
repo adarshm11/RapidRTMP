@@ -7,6 +7,7 @@ import (
 	"rapidrtmp/httpServer"
 	"rapidrtmp/internal/auth"
 	"rapidrtmp/internal/rtmp"
+	"rapidrtmp/internal/segmenter"
 	"rapidrtmp/internal/storage"
 	"rapidrtmp/internal/streammanager"
 )
@@ -32,12 +33,16 @@ func main() {
 	authManager := auth.New()
 	log.Println("Stream manager and auth manager initialized")
 
+	// Initialize segmenter
+	seg := segmenter.New(localStorage, streamManager)
+	log.Println("HLS segmenter initialized")
+
 	// Initialize HTTP server
-	httpSrv := httpServer.New(streamManager, authManager, cfg.RTMPIngestAddr)
+	httpSrv := httpServer.New(streamManager, authManager, seg, cfg.RTMPIngestAddr)
 	log.Printf("HTTP server ready to start on %s", cfg.HTTPAddr)
 
 	// Initialize RTMP ingest server
-	rtmpSrv := rtmp.New(cfg.RTMPAddr, streamManager, authManager)
+	rtmpSrv := rtmp.New(cfg.RTMPAddr, streamManager, authManager, seg)
 	go func() {
 		log.Printf("Starting RTMP ingest server on %s...", cfg.RTMPAddr)
 		if err := rtmpSrv.ListenAndServe(); err != nil {

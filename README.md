@@ -5,7 +5,8 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 ## 🚀 Current Status
 
 **Phase 1: Core Infrastructure** ✅ **COMPLETE**  
-**Phase 2: RTMP Ingest** ✅ **COMPLETE**
+**Phase 2: RTMP Ingest** ✅ **COMPLETE**  
+**Phase 3: HLS Packaging** ✅ **COMPLETE**
 
 ### Implemented Features:
 
@@ -18,21 +19,31 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 - ✅ **Configuration** - Environment-based config management
 - ✅ **Frame Processing** - Extract H.264 video and AAC audio frames
 - ✅ **Publisher Authentication** - Validate tokens from OBS/FFmpeg
+- ✅ **HLS Segmenter** - Generate HLS playlists and segments
+- ✅ **Segment Storage** - Automatic segment management with retention policy
+- ✅ **HLS Playback** - Serve streams to viewers via HTTP
 
 **What's Working:**
-- ✅ Accept RTMP streams from OBS Studio and FFmpeg
-- ✅ Generate publish tokens via API
-- ✅ Real-time frame extraction (video/audio)
-- ✅ List active streams with metadata
-- ✅ Get stream info (codec, resolution, bitrate)
-- ✅ Stop streams remotely
-- ✅ Track stream statistics (frames, viewers, dropped frames)
-- ✅ Health check endpoint
+- ✅ **Accept RTMP streams** from OBS Studio and FFmpeg
+- ✅ **Generate publish tokens** via API
+- ✅ **Real-time frame extraction** (video/audio)
+- ✅ **Automatic HLS segmentation** (2-second segments)
+- ✅ **HLS playlist generation** (.m3u8 files)
+- ✅ **Serve HLS streams** to browsers (init.mp4 + segments)
+- ✅ **List active streams** with metadata
+- ✅ **Get stream info** (codec, resolution, bitrate)
+- ✅ **Stop streams remotely**
+- ✅ **Track stream statistics** (frames, viewers, dropped frames)
+- ✅ **Web-based test player** for HLS playback
+- ✅ **Low-latency streaming** with CORS support
 
-**What's Next (Phase 3):**
-- 🔨 Remuxer (RTMP → fMP4/CMAF conversion)
-- 🔨 HLS Segmenter (generate playlists and segments)
-- 🔨 HLS Playback (serve to viewers)
+**What's Next (Phase 4+):**
+- 🔨 Proper fMP4/CMAF muxing (currently simplified)
+- 🔨 Multi-bitrate transcoding (ABR)
+- 🔨 WebRTC gateway for sub-second latency
+- 🔨 DVR/VOD support
+- 🔨 Prometheus metrics
+- 🔨 CDN integration
 
 ## 📋 Requirements
 
@@ -260,8 +271,23 @@ curl http://localhost:8080/api/v1/streams
 4. Server: `rtmp://localhost:1935/live`
 5. Stream Key: `your-stream-key?token=YOUR_TOKEN`
 6. Click "Start Streaming"
+7. **Open `test-player.html` in your browser to watch!**
 
 **See [TESTING.md](TESTING.md) for comprehensive testing guide.**
+
+### Watch HLS Stream in Browser
+
+Open the included test player:
+```bash
+open test-player.html
+```
+
+Or access the HLS playlist directly:
+```
+http://localhost:8080/live/your-stream-key/index.m3u8
+```
+
+Use with any HLS player (VLC, hls.js, video.js, etc.)
 
 ### API Testing
 
@@ -303,12 +329,16 @@ curl -X POST http://localhost:8080/api/v1/streams/test/stop
 - [x] Integration with stream manager
 - [x] Frame pub/sub to downstream consumers
 
-### Phase 3: HLS Packaging
-- [ ] Remuxer (RTMP → fMP4)
-- [ ] CMAF/fMP4 segmenter
-- [ ] HLS playlist generation
-- [ ] Segment serving via HTTP
-- [ ] Proper caching headers
+### Phase 3: HLS Packaging ✅ **COMPLETE**
+- [x] HLS segmenter (2-second segments, sliding window)
+- [x] Automatic segmentation on stream start
+- [x] HLS playlist generation (.m3u8)
+- [x] Segment serving via HTTP
+- [x] Init segment support (init.mp4)
+- [x] Proper caching headers (low-latency optimized)
+- [x] CORS support for web playback
+- [x] Automatic cleanup and retention policy
+- [x] Web-based test player (hls.js)
 
 ### Phase 4: Production Features
 - [ ] Prometheus metrics

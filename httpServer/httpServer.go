@@ -3,9 +3,12 @@ package httpServer
 import (
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/segmenter"
 	"rapidrtmp/internal/streammanager"
 	"rapidrtmp/pkg/models"
 
@@ -17,14 +20,16 @@ type Server struct {
 	router         *gin.Engine
 	streamManager  *streammanager.Manager
 	authManager    *auth.Manager
+	segmenter      *segmenter.Segmenter
 	rtmpIngestAddr string // e.g., "rtmp://localhost:1935"
 }
 
 // New creates a new HTTP server
-func New(streamManager *streammanager.Manager, authManager *auth.Manager, rtmpIngestAddr string) *Server {
+func New(streamManager *streammanager.Manager, authManager *auth.Manager, seg *segmenter.Segmenter, rtmpIngestAddr string) *Server {
 	s := &Server{
 		streamManager:  streamManager,
 		authManager:    authManager,
+		segmenter:      seg,
 		rtmpIngestAddr: rtmpIngestAddr,
 	}
 
@@ -150,9 +155,20 @@ func (s *Server) handlePlaylist(c *gin.Context) {
 		return
 	}
 
-	// TODO: Serve actual HLS playlist
-	// For now, return a placeholder
-	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte("#EXTM3U\n#EXT-X-VERSION:7\n"))
+	// Get playlist from segmenter
+	playlist, err := s.segmenter.GetPlaylist(streamKey)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "playlist not available"})
+		return
+	}
+
+	// Set caching headers for low-latency
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte(playlist))
 }
 
 func (s *Server) handleInitSegment(c *gin.Context) {
@@ -164,13 +180,23 @@ func (s *Server) handleInitSegment(c *gin.Context) {
 		return
 	}
 
-	// TODO: Serve actual init segment
-	c.JSON(http.StatusNotImplemented, gin.H{"error": "init segment not implemented yet"})
+	// Get init segment from segmenter
+	initData, err := s.segmenter.GetInitSegment(streamKey)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "init segment not available"})
+		return
+	}
+
+	// Set caching headers (init segment can be cached longer)
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	c.Data(http.StatusOK, "video/mp4", initData)
 }
 
 func (s *Server) handleMediaSegment(c *gin.Context) {
 	streamKey := c.Param("streamKey")
-	segment := c.Param("segment")
+	segmentParam := c.Param("segment")
 
 	stream, exists := s.streamManager.GetStream(streamKey)
 	if !exists || stream.GetState() != models.StreamStateLive {
@@ -178,8 +204,26 @@ func (s *Server) handleMediaSegment(c *gin.Context) {
 		return
 	}
 
-	// TODO: Serve actual media segment
-	c.JSON(http.StatusNotImplemented, gin.H{"error": fmt.Sprintf("segment %s not implemented yet", segment)})
+	// Parse segment number from filename (e.g., "segment_5" -> 5)
+	segmentNumStr := strings.TrimPrefix(segmentParam, "segment_")
+	segmentNum, err := strconv.ParseUint(segmentNumStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid segment number"})
+		return
+	}
+
+	// Get segment from segmenter
+	segmentData, err := s.segmenter.GetSegment(streamKey, segmentNum)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "segment not found"})
+		return
+	}
+
+	// Set caching headers (segments can be cached)
+	c.Header("Cache-Control", "public, max-age=60")
+	c.Header("Access-Control-Allow-Origin", "*")
+
+	c.Data(http.StatusOK, "video/mp4", segmentData)
 }
 
 // Helper functions
@@ -216,7 +260,14 @@ func SetupRouter() *gin.Engine {
 	// Create default dependencies
 	streamManager := streammanager.New()
 	authManager := auth.New()
+	// Note: segmenter would need storage, which we don't have here
+	// This function is mainly for backward compatibility
 
-	server := New(streamManager, authManager, "rtmp://localhost:1935")
+	server := &Server{
+		streamManager:  streamManager,
+		authManager:    authManager,
+		rtmpIngestAddr: "rtmp://localhost:1935",
+	}
+	server.setupRoutes()
 	return server.router
 }

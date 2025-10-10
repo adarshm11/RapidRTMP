@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RapidRTMP - HLS Test Player</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .player-card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            margin-bottom: 30px;
+        }
+
+        .video-container {
+            position: relative;
+            width: 100%;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .controls {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: #333;
+        }
+
+        input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            flex: 1;
+            min-width: 150px;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .status {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .status-label {
+            font-weight: 600;
+            color: #666;
+        }
+
+        .status-value {
+            color: #333;
+        }
+
+        .status-value.live {
+            color: #28a745;
+            font-weight: 600;
+        }
+
+        .status-value.offline {
+            color: #dc3545;
+        }
+
+        .info-box {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            border-left: 4px solid #2196f3;
+        }
+
+        .info-box h3 {
+            color: #1976d2;
+            margin-bottom: 10px;
+        }
+
+        .info-box p, .info-box li {
+            color: #555;
+            line-height: 1.6;
+        }
+
+        .info-box ul {
+            margin-left: 20px;
+        }
+
+        .info-box code {
+            background: #fff;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            color: #d32f2f;
+        }
+
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            border-left: 4px solid #c62828;
+        }
+
+        @media (max-width: 768px) {
+            .button-group {
+                flex-direction: column;
+            }
+
+            button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 RapidRTMP Test Player</h1>
+
+        <div class="player-card">
+            <div class="video-container">
+                <video id="video" controls></video>
+            </div>
+
+            <div class="controls">
+                <div class="form-group">
+                    <label for="streamKey">Stream Key:</label>
+                    <input type="text" id="streamKey" placeholder="Enter stream key (e.g., test-stream)" value="test-stream">
+                </div>
+
+                <div class="button-group">
+                    <button class="btn-primary" onclick="loadStream()">▶ Load Stream</button>
+                    <button class="btn-secondary" onclick="stopStream()">⏹ Stop</button>
+                    <button class="btn-secondary" onclick="checkStreamStatus()">🔄 Check Status</button>
+                </div>
+            </div>
+
+            <div class="status" id="status">
+                <div class="status-item">
+                    <span class="status-label">Status:</span>
+                    <span class="status-value" id="playerStatus">Not loaded</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Stream URL:</span>
+                    <span class="status-value" id="streamUrl">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Server Status:</span>
+                    <span class="status-value" id="serverStatus">Checking...</span>
+                </div>
+            </div>
+
+            <div class="info-box">
+                <h3>📖 How to Test</h3>
+                <p><strong>1. Start the RapidRTMP Server:</strong></p>
+                <ul>
+                    <li>Run: <code>./rapidrtmp</code></li>
+                    <li>Server should be running on <code>:8080</code> (HTTP) and <code>:1935</code> (RTMP)</li>
+                </ul>
+
+                <p><strong>2. Generate a Publish Token:</strong></p>
+                <ul>
+                    <li><code>curl -X POST http://localhost:8080/api/v1/publish -H "Content-Type: application/json" -d '{"streamKey":"test-stream","expiresIn":3600}'</code></li>
+                </ul>
+
+                <p><strong>3. Start Streaming with FFmpeg:</strong></p>
+                <ul>
+                    <li><code>ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000 -c:v libx264 -preset veryfast -b:v 2500k -c:a aac -b:a 128k -f flv "rtmp://localhost:1935/live/test-stream?token=YOUR_TOKEN"</code></li>
+                </ul>
+
+                <p><strong>4. Open this page in your browser and click "Load Stream"</strong></p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const streamKeyInput = document.getElementById('streamKey');
+        let hls = null;
+
+        // Check server status on load
+        checkServerStatus();
+
+        function checkServerStatus() {
+            fetch('http://localhost:8080/api/ping')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('serverStatus').innerHTML = '<span class="live">✓ Online</span>';
+                })
+                .catch(err => {
+                    document.getElementById('serverStatus').innerHTML = '<span class="offline">✗ Offline</span>';
+                });
+        }
+
+        function loadStream() {
+            const streamKey = streamKeyInput.value.trim();
+            if (!streamKey) {
+                alert('Please enter a stream key');
+                return;
+            }
+
+            const streamUrl = `http://localhost:8080/live/${streamKey}/index.m3u8`;
+            document.getElementById('streamUrl').textContent = streamUrl;
+            document.getElementById('playerStatus').textContent = 'Loading...';
+
+            if (Hls.isSupported()) {
+                if (hls) {
+                    hls.destroy();
+                }
+
+                hls = new Hls({
+                    debug: true,
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    backBufferLength: 90
+                });
+
+                hls.loadSource(streamUrl);
+                hls.attachMedia(video);
+
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    document.getElementById('playerStatus').innerHTML = '<span class="live">✓ Playing</span>';
+                    video.play().catch(e => {
+                        console.error('Play failed:', e);
+                        document.getElementById('playerStatus').innerHTML = '<span class="offline">✗ Play failed (click video to play)</span>';
+                    });
+                });
+
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    console.error('HLS Error:', data);
+                    if (data.fatal) {
+                        document.getElementById('playerStatus').innerHTML = `<span class="offline">✗ Error: ${data.type}</span>`;
+                        switch(data.type) {
+                            case Hls.ErrorTypes.NETWORK_ERROR:
+                                console.log('Network error - trying to recover');
+                                hls.startLoad();
+                                break;
+                            case Hls.ErrorTypes.MEDIA_ERROR:
+                                console.log('Media error - trying to recover');
+                                hls.recoverMediaError();
+                                break;
+                            default:
+                                hls.destroy();
+                                break;
+                        }
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                // Native HLS support (Safari)
+                video.src = streamUrl;
+                video.addEventListener('loadedmetadata', function() {
+                    document.getElementById('playerStatus').innerHTML = '<span class="live">✓ Playing</span>';
+                    video.play();
+                });
+                video.addEventListener('error', function() {
+                    document.getElementById('playerStatus').innerHTML = '<span class="offline">✗ Error loading stream</span>';
+                });
+            } else {
+                alert('HLS is not supported in this browser');
+            }
+        }
+
+        function stopStream() {
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            video.pause();
+            video.src = '';
+            document.getElementById('playerStatus').textContent = 'Stopped';
+            document.getElementById('streamUrl').textContent = '-';
+        }
+
+        function checkStreamStatus() {
+            const streamKey = streamKeyInput.value.trim();
+            if (!streamKey) {
+                alert('Please enter a stream key');
+                return;
+            }
+
+            fetch(`http://localhost:8080/api/v1/streams/${streamKey}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.active) {
+                        alert(`Stream is LIVE!\nViewers: ${data.viewers}\nDuration: ${data.duration}s\nCodec: ${data.videoCodec}/${data.audioCodec}`);
+                    } else {
+                        alert('Stream is offline or not found');
+                    }
+                })
+                .catch(err => {
+                    alert('Failed to check stream status. Is the server running?');
+                });
+        }
+
+        // Auto-refresh server status
+        setInterval(checkServerStatus, 5000);
+    </script>
+</body>
+</html>
+
