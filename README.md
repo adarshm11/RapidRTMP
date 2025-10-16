@@ -33,15 +33,19 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 - ✅ **Accept RTMP streams** from OBS Studio and FFmpeg
 - ✅ **Generate publish tokens** via API
 - ✅ **Real-time frame extraction** (video/audio)
-- ✅ **Automatic HLS segmentation** (2-second segments)
-- ✅ **HLS playlist generation** (.m3u8 files)
-- ✅ **Serve HLS streams** to browsers (init.mp4 + segments)
+- ✅ **H.264 codec data extraction** (SPS/PPS from AVC sequence headers)
+- ✅ **AVCC to Annex-B conversion** for proper H.264 handling
+- ✅ **Automatic HLS segmentation** (1-second segments for low latency)
+- ✅ **FFmpeg-based fMP4/CMAF muxing** for browser-compatible segments
+- ✅ **HLS playlist generation** (.m3u8 files with INDEPENDENT-SEGMENTS)
+- ✅ **Serve HLS streams** to browsers (init.mp4 + CMAF segments)
 - ✅ **List active streams** with metadata
 - ✅ **Get stream info** (codec, resolution, bitrate)
 - ✅ **Stop streams remotely**
 - ✅ **Track stream statistics** (frames, viewers, dropped frames)
-- ✅ **Web-based test player** for HLS playback
-- ✅ **Low-latency streaming** with CORS support
+- ✅ **Web-based test player** with auto-recovery and cache-busting
+- ✅ **Low-latency streaming** (~1-2 seconds glass-to-glass)
+- ✅ **CORS support** for cross-origin playback
 - ✅ **Prometheus metrics** (30+ metrics tracked)
 - ✅ **Health/readiness endpoints** for K8s
 - ✅ **Docker containerization** with multi-stage builds
@@ -50,19 +54,28 @@ A high-performance RTMP streaming server written in Go, designed to accept live 
 - ✅ **GCS storage backend** with signed URLs and CDN integration
 
 **Future Enhancements:**
-- 🔨 Proper fMP4/CMAF muxing (currently simplified)
-- 🔨 Multi-bitrate transcoding (ABR)
+- 🔨 Multi-bitrate transcoding (ABR/adaptive streaming)
 - 🔨 WebRTC gateway for sub-second latency
-- 🔨 DVR/VOD support
+- 🔨 DVR/VOD support with recording
 - 🔨 AWS S3 storage backend
 - 🔨 Azure Blob Storage backend
 - 🔨 CloudFront/Fastly CDN integration
 - 🔨 Distributed tracing (OpenTelemetry)
+- 🔨 Audio-only streams and audio muxing
+- 🔨 Stream overlays and watermarks
 
 ## 📋 Requirements
 
 - **Go 1.24.3+**
-- No external dependencies needed for building (Go modules handles everything)
+- **FFmpeg** - Required for HLS segment muxing (install with `brew install ffmpeg` on macOS)
+- No other external dependencies (Go modules handles everything)
+- **Optional**: Google Cloud Platform account for GCS storage
+
+## 📚 Documentation
+
+- **[GCS Setup Guide](docs/GCS_SETUP.md)** - Complete guide for Google Cloud Storage
+- **[TESTING.md](TESTING.md)** - How to test with OBS/FFmpeg
+- **[test-player.html](test-player.html)** - Web-based HLS player
 
 ## 🛠️ Installation
 
@@ -76,11 +89,31 @@ go build
 
 ### Run
 
+#### Local Storage (Default)
+
 ```bash
 ./rapidrtmp
 ```
 
-The server will start on `http://localhost:8080` by default.
+#### Google Cloud Storage
+
+```bash
+# Set up GCS credentials (see docs/GCS_SETUP.md)
+export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account-key.json"
+
+# Configure GCS
+export STORAGE_TYPE="gcs"
+export GCS_PROJECT_ID="your-project-id"
+export GCS_BUCKET_NAME="your-bucket-name"
+
+./rapidrtmp
+```
+
+The server will start with:
+- **HTTP API**: `http://localhost:8080`
+- **RTMP Ingest**: `rtmp://localhost:1935`
+- **Metrics**: `http://localhost:8080/metrics`
+- **Health**: `http://localhost:8080/health`
 
 ### Configuration
 
@@ -90,12 +123,20 @@ Configure via environment variables:
 # HTTP Server
 export HTTP_ADDR=":8080"
 
-# RTMP Server (not yet implemented)
+# RTMP Server
 export RTMP_ADDR=":1935"
 export RTMP_INGEST_ADDR="rtmp://localhost:1935"
 
-# Storage
+# Storage - Local (default)
+export STORAGE_TYPE="local"
 export STORAGE_DIR="./data/streams"
+
+# Storage - Google Cloud Storage (optional)
+export STORAGE_TYPE="gcs"
+export GCS_PROJECT_ID="your-project-id"
+export GCS_BUCKET_NAME="your-bucket-name"
+export GCS_BASE_DIR="streams"
+export GOOGLE_APPLICATION_CREDENTIALS="path/to/key.json"
 
 # HLS Settings
 export HLS_SEGMENT_DURATION="2s"
@@ -190,11 +231,23 @@ POST /api/v1/streams/:streamKey/stop
 }
 ```
 
-### HLS Endpoints (Not Yet Implemented)
+### HLS Playback Endpoints
 ```bash
-GET /live/:streamKey/index.m3u8  # HLS playlist
-GET /live/:streamKey/init.mp4    # Initialization segment
-GET /live/:streamKey/:segment.m4s # Media segment
+GET /live/:streamKey/index.m3u8     # HLS playlist
+GET /live/:streamKey/init.mp4        # Initialization segment (fMP4)
+GET /live/:streamKey/segment_N.m4s   # Media segment (CMAF fragment)
+```
+
+**Example:**
+```bash
+# Get playlist
+curl http://localhost:8080/live/test/index.m3u8
+
+# Get init segment
+curl http://localhost:8080/live/test/init.mp4 -o init.mp4
+
+# Get media segment
+curl http://localhost:8080/live/test/segment_0.m4s -o segment_0.m4s
 ```
 
 ## 🏗️ Architecture
@@ -255,26 +308,37 @@ RapidRTMP/
 
 ## 🧪 Testing
 
-### Quick Start
+### Quick Start - Complete End-to-End Test
 
 ```bash
 # 1. Start the server
 ./rapidrtmp
 
-# 2. Generate a publish token
-curl -X POST http://localhost:8080/api/v1/publish \
-  -H "Content-Type: application/json" \
-  -d '{"streamKey":"test","expiresIn":3600}'
+# 2. In a new terminal, start a test stream (2 minutes, 1-second keyframes)
+pkill -9 ffmpeg 2>/dev/null
+TOKEN=$(curl -s http://localhost:8080/api/v1/publish -H "Content-Type: application/json" -d '{"streamKey":"test"}' | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+nohup ffmpeg -re -t 120 -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000 -pix_fmt yuv420p -profile:v high -level:v 4.1 -g 30 -keyint_min 30 -sc_threshold 0 -c:v libx264 -preset veryfast -b:v 2500k -c:a aac -b:a 128k -f flv "rtmp://localhost:1935/live/test?token=$TOKEN" </dev/null >/tmp/ffmpeg.log 2>&1 &
 
-# 3. Stream with FFmpeg (test pattern)
-ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
-  -f lavfi -i sine=frequency=1000 \
-  -c:v libx264 -preset veryfast -b:v 2500k \
-  -c:a aac -b:a 128k \
-  -f flv "rtmp://localhost:1935/live/test?token=YOUR_TOKEN_HERE"
+# 3. Verify stream is live
+curl -s http://localhost:8080/api/v1/streams/test | python3 -m json.tool
 
-# 4. Check active streams
-curl http://localhost:8080/api/v1/streams
+# 4. Check playlist
+curl -s http://localhost:8080/live/test/index.m3u8 | head -15
+
+# 5. Open test-player.html in browser, enter "test" as stream key, click Load Stream
+```
+
+### Verify Stream Quality
+
+```bash
+# Check stream info
+curl -s http://localhost:8080/api/v1/streams/test | python3 -m json.tool
+
+# Monitor playlist updates (should increment every ~1 second)
+watch -n 1 'curl -s http://localhost:8080/live/test/index.m3u8 | head -8'
+
+# Check FFmpeg logs
+tail -f /tmp/ffmpeg.log
 ```
 
 ### Test with OBS Studio
@@ -291,17 +355,36 @@ curl http://localhost:8080/api/v1/streams
 
 ### Watch HLS Stream in Browser
 
-Open the included test player:
+**Option 1: Built-in Test Player (Recommended)**
+
+Open `test-player.html` in your browser:
 ```bash
-open test-player.html
+# Serve via Python HTTP server for best results
+python3 -m http.server 8888
+# Then open: http://localhost:8888/test-player.html
 ```
 
-Or access the HLS playlist directly:
+Features:
+- ✅ Auto cache-busting for fresh content
+- ✅ Auto-recovery from buffering
+- ✅ Live edge tracking
+- ✅ Error reporting with details
+- ✅ Status indicators
+
+**Option 2: Direct HLS URL**
+
+Use the playlist URL with any HLS player:
 ```
 http://localhost:8080/live/your-stream-key/index.m3u8
 ```
 
-Use with any HLS player (VLC, hls.js, video.js, etc.)
+Compatible with:
+- VLC Media Player
+- Safari (native HLS)
+- hls.js
+- video.js
+- JW Player
+- Shaka Player
 
 ### API Testing
 
@@ -354,13 +437,18 @@ curl -X POST http://localhost:8080/api/v1/streams/test/stop
 - [x] Automatic cleanup and retention policy
 - [x] Web-based test player (hls.js)
 
-### Phase 4: Production Features
-- [ ] Prometheus metrics
-- [ ] Structured logging
-- [ ] WebRTC gateway (optional)
-- [ ] Multi-bitrate transcoding
-- [ ] CDN integration
-- [ ] S3 storage backend
+### Phase 4: Production Features ✅ **COMPLETE**
+- [x] Prometheus metrics (30+ metrics)
+- [x] Structured logging
+- [x] Health and readiness endpoints
+- [x] Docker containerization
+- [x] Kubernetes manifests
+- [x] GCS storage backend
+- [x] Metrics middleware
+- [ ] WebRTC gateway (future)
+- [ ] Multi-bitrate transcoding (future)
+- [ ] CDN integration (future)
+- [ ] AWS S3 storage backend (future)
 
 ### Phase 5: Scale & Optimize
 - [ ] Horizontal scaling

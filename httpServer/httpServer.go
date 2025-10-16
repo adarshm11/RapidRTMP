@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"rapidrtmp/internal/auth"
@@ -62,11 +61,14 @@ func (s *Server) setupRoutes() {
 		api.POST("/v1/streams/:streamKey/stop", s.handleStopStream)
 	}
 
-	live := router.Group("/live")
+	live := router.Group("/live/:streamKey")
 	{
-		live.GET("/:streamKey/index.m3u8", s.handlePlaylist)
-		live.GET("/:streamKey/init.mp4", s.handleInitSegment)
-		live.GET("/:streamKey/:segment.m4s", s.handleMediaSegment)
+		live.GET("/index.m3u8", s.handlePlaylist)
+		live.HEAD("/index.m3u8", s.handlePlaylist) // respond to HEAD for players that probe
+		live.GET("/init.mp4", s.handleInitSegment)
+		live.HEAD("/init.mp4", s.handleInitSegment)
+		live.GET("/:filename", s.handleMediaSegment)
+		live.HEAD("/:filename", s.handleMediaSegment)
 	}
 
 	s.router = router
@@ -227,12 +229,6 @@ func (s *Server) handleStopStream(c *gin.Context) {
 func (s *Server) handlePlaylist(c *gin.Context) {
 	streamKey := c.Param("streamKey")
 
-	stream, exists := s.streamManager.GetStream(streamKey)
-	if !exists || stream.GetState() != models.StreamStateLive {
-		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found or not live"})
-		return
-	}
-
 	// Get playlist from segmenter
 	playlist, err := s.segmenter.GetPlaylist(streamKey)
 	if err != nil {
@@ -252,12 +248,6 @@ func (s *Server) handlePlaylist(c *gin.Context) {
 func (s *Server) handleInitSegment(c *gin.Context) {
 	streamKey := c.Param("streamKey")
 
-	stream, exists := s.streamManager.GetStream(streamKey)
-	if !exists || stream.GetState() != models.StreamStateLive {
-		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found or not live"})
-		return
-	}
-
 	// Get init segment from segmenter
 	initData, err := s.segmenter.GetInitSegment(streamKey)
 	if err != nil {
@@ -274,19 +264,29 @@ func (s *Server) handleInitSegment(c *gin.Context) {
 
 func (s *Server) handleMediaSegment(c *gin.Context) {
 	streamKey := c.Param("streamKey")
-	segmentParam := c.Param("segment")
+	filename := c.Param("filename")
 
-	stream, exists := s.streamManager.GetStream(streamKey)
-	if !exists || stream.GetState() != models.StreamStateLive {
-		c.JSON(http.StatusNotFound, gin.H{"error": "stream not found or not live"})
+	// Only handle .m4s files
+	if len(filename) < 5 || filename[len(filename)-4:] != ".m4s" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 
-	// Parse segment number from filename (e.g., "segment_5" -> 5)
-	segmentNumStr := strings.TrimPrefix(segmentParam, "segment_")
+	// Remove .m4s extension
+	filename = filename[:len(filename)-4]
+
+	// Extract segment number from "segment_N"
+	if len(filename) < 9 || filename[:8] != "segment_" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid segment format"})
+		return
+	}
+
+	segmentNumStr := filename[8:]
+
+	// Parse segment number
 	segmentNum, err := strconv.ParseUint(segmentNumStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid segment number"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid segment number: %s", segmentNumStr)})
 		return
 	}
 
@@ -297,8 +297,35 @@ func (s *Server) handleMediaSegment(c *gin.Context) {
 		return
 	}
 
-	// Set caching headers (segments can be cached)
-	c.Header("Cache-Control", "public, max-age=60")
+	// If segment starts with full MP4 (ftyp/moov), trim to start at first moof box for fMP4 streaming
+	if len(segmentData) >= 12 {
+		// look for 'moof' (0x6d6f6f66)
+		moofTag := []byte{'m', 'o', 'o', 'f'}
+		if !(segmentData[4] == 'f' && segmentData[5] == 't' && segmentData[6] == 'y' && segmentData[7] == 'p') {
+			// not starting with ftyp; leave as-is
+		} else {
+			// scan for moof
+			idx := -1
+			for i := 8; i <= len(segmentData)-4; i++ {
+				if segmentData[i] == moofTag[0] && segmentData[i+1] == moofTag[1] && segmentData[i+2] == moofTag[2] && segmentData[i+3] == moofTag[3] {
+					idx = i
+					break
+				}
+			}
+			if idx > 4 {
+				// slice starting at size field preceding moof
+				start := idx - 4
+				if start >= 0 && start < len(segmentData) {
+					segmentData = segmentData[start:]
+				}
+			}
+		}
+	}
+
+	// Live segments: avoid caching to prevent stalling on stale fragments
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	c.Header("Access-Control-Allow-Origin", "*")
 
 	c.Data(http.StatusOK, "video/mp4", segmentData)

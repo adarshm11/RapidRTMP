@@ -11,6 +11,7 @@ import (
 	rtmpmsg "github.com/yutopp/go-rtmp/message"
 
 	"rapidrtmp/internal/auth"
+	"rapidrtmp/internal/muxer"
 	"rapidrtmp/internal/segmenter"
 	"rapidrtmp/internal/streammanager"
 	"rapidrtmp/pkg/models"
@@ -98,6 +99,9 @@ type ConnHandler struct {
 	streamKey     string
 	stream        *models.Stream
 	publishToken  string
+	sps           [][]byte // H.264 Sequence Parameter Sets
+	pps           [][]byte // H.264 Picture Parameter Sets
+	naluLength    int      // NALU length size from AVCC
 	mu            sync.RWMutex
 }
 
@@ -248,28 +252,83 @@ func (h *ConnHandler) OnVideo(timestamp uint32, payload io.Reader) error {
 		return err
 	}
 
-	if n > 0 {
-		// Simple keyframe detection: first byte indicates frame type in FLV format
-		// 0x17 = keyframe (AVC), 0x27 = inter frame (AVC)
-		isKeyFrame := false
-		if n > 0 && (videoData[0]&0xF0) == 0x10 {
-			isKeyFrame = true
+	if n == 0 {
+		return nil
+	}
+
+	// Parse FLV video packet
+	isSequenceHeader, isKeyFrame, avcData, err := muxer.ParseFLVVideoPacket(videoData[:n])
+	if err != nil {
+		log.Printf("Failed to parse FLV video packet: %v", err)
+		return nil // Don't fail, just skip this packet
+	}
+
+	// Handle AVC sequence header (contains SPS/PPS)
+	if isSequenceHeader {
+		log.Printf("Received AVC sequence header for stream %s (%d bytes)", streamKey, len(avcData))
+
+		// Parse AVCDecoderConfigurationRecord to extract SPS/PPS
+		avcConfig, err := muxer.ParseAVCDecoderConfigurationRecord(avcData)
+		if err != nil {
+			log.Printf("Failed to parse AVCDecoderConfigurationRecord: %v", err)
+			return nil
 		}
 
-		// Create frame and publish to stream manager
-		frame := &models.Frame{
-			StreamKey:  streamKey,
-			IsVideo:    true,
-			Timestamp:  timestamp,
-			Payload:    videoData[:n],
-			Codec:      "h264", // Assume H.264 for now
-			IsKeyFrame: isKeyFrame,
-		}
+		// Store SPS/PPS for later use
+		h.mu.Lock()
+		h.sps = avcConfig.SPS
+		h.pps = avcConfig.PPS
+		h.naluLength = int(avcConfig.NALUnitLength)
+		h.mu.Unlock()
 
-		// Publish frame to subscribers
-		if err := h.streamManager.PublishFrame(frame); err != nil {
-			log.Printf("Failed to publish video frame: %v", err)
+		log.Printf("Stored SPS/PPS for stream %s: %d SPS, %d PPS, NALU length=%d",
+			streamKey, len(avcConfig.SPS), len(avcConfig.PPS), avcConfig.NALUnitLength)
+
+		// Don't send sequence header as a frame, it's just configuration
+		return nil
+	}
+
+	// Convert AVCC to Annex-B
+	annexBData, err := muxer.ConvertAVCCToAnnexB(avcData)
+	if err != nil {
+		log.Printf("Failed to convert AVCC to Annex-B: %v", err)
+		// Fall back to original data
+		annexBData = avcData
+	}
+
+	// For keyframes, prepend SPS/PPS
+	var frameData []byte
+	if isKeyFrame {
+		h.mu.RLock()
+		sps := h.sps
+		pps := h.pps
+		h.mu.RUnlock()
+
+		if len(sps) > 0 && len(pps) > 0 {
+			// Prepend SPS/PPS to keyframe
+			frameData = muxer.PrependSPSPPSAnnexB(annexBData, sps, pps)
+			log.Printf("Prepended SPS/PPS to keyframe for stream %s (total size: %d bytes)", streamKey, len(frameData))
+		} else {
+			log.Printf("Warning: Keyframe received but no SPS/PPS stored for stream %s", streamKey)
+			frameData = annexBData
 		}
+	} else {
+		frameData = annexBData
+	}
+
+	// Create frame and publish to stream manager
+	frame := &models.Frame{
+		StreamKey:  streamKey,
+		IsVideo:    true,
+		Timestamp:  timestamp,
+		Payload:    frameData,
+		Codec:      "h264",
+		IsKeyFrame: isKeyFrame,
+	}
+
+	// Publish frame to subscribers
+	if err := h.streamManager.PublishFrame(frame); err != nil {
+		log.Printf("Failed to publish video frame: %v", err)
 	}
 
 	return nil
@@ -284,12 +343,12 @@ func (h *ConnHandler) OnClose() {
 
 	if h.stream != nil && h.streamKey != "" {
 		log.Printf("Stopping stream %s", h.streamKey)
-		
+
 		// Stop segmentation
 		if h.segmenter != nil {
 			h.segmenter.StopSegmenting(h.streamKey)
 		}
-		
+
 		h.streamManager.StopStream(h.streamKey)
 	}
 }
@@ -316,4 +375,3 @@ func parseStreamKeyAndToken(publishingName string) (streamKey, token string) {
 	streamKey = publishingName
 	return
 }
-

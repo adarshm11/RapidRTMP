@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"rapidrtmp/internal/muxer"
 	"rapidrtmp/internal/storage"
 	"rapidrtmp/internal/streammanager"
 	"rapidrtmp/pkg/models"
@@ -17,6 +18,7 @@ type Segmenter struct {
 	storage       storage.Storage
 	streamManager *streammanager.Manager
 	playlists     map[string]*PlaylistManager
+	muxer         *muxer.FFmpegMuxer
 	mu            sync.RWMutex
 
 	// Config
@@ -26,11 +28,17 @@ type Segmenter struct {
 
 // New creates a new segmenter
 func New(storage storage.Storage, streamManager *streammanager.Manager) *Segmenter {
+	// Check if FFmpeg is available
+	if err := muxer.CheckFFmpegAvailable(); err != nil {
+		log.Printf("WARNING: FFmpeg not available, segments will not be playable: %v", err)
+	}
+
 	return &Segmenter{
 		storage:         storage,
 		streamManager:   streamManager,
 		playlists:       make(map[string]*PlaylistManager),
-		segmentDuration: 2 * time.Second,
+		muxer:           muxer.NewFFmpegMuxer(),
+		segmentDuration: 1 * time.Second,
 		maxSegments:     10,
 	}
 }
@@ -47,13 +55,13 @@ func (s *Segmenter) StartSegmenting(streamKey string) error {
 
 	// Create playlist manager
 	pm := &PlaylistManager{
-		streamKey:       streamKey,
-		segmenter:       s,
-		segments:        make([]*models.Segment, 0),
-		targetDuration:  int(s.segmentDuration.Seconds()),
-		maxSegments:     s.maxSegments,
-		sequenceNumber:  0,
-		currentSegment:  newSegmentBuffer(),
+		streamKey:      streamKey,
+		segmenter:      s,
+		segments:       make([]*models.Segment, 0),
+		targetDuration: int(s.segmentDuration.Seconds()),
+		maxSegments:    s.maxSegments,
+		sequenceNumber: 0,
+		currentSegment: newSegmentBuffer(),
 	}
 
 	s.playlists[streamKey] = pm
@@ -249,24 +257,57 @@ func (pm *PlaylistManager) finalizeSegment() {
 }
 
 // framesToSegmentData converts frames to segment data
-// This is a simplified version - in production you'd use a proper MP4 muxer
+// framesToSegmentData converts frames to fMP4 segment using FFmpeg
 func (pm *PlaylistManager) framesToSegmentData(frames []*models.Frame) []byte {
-	var buf bytes.Buffer
-
-	// Simple concatenation of frame payloads
-	// In production, this would be proper fMP4/CMAF packaging
-	for _, frame := range frames {
-		buf.Write(frame.Payload)
+	// Use FFmpeg muxer to create proper fMP4 segment
+	segmentData, err := pm.segmenter.muxer.MuxFramesToMP4(frames)
+	if err != nil {
+		log.Printf("Failed to mux frames for stream %s: %v", pm.streamKey, err)
+		// Fallback to raw concatenation (won't play but better than nothing)
+		var buf bytes.Buffer
+		for _, frame := range frames {
+			buf.Write(frame.Payload)
+		}
+		return buf.Bytes()
 	}
 
-	return buf.Bytes()
+	return segmentData
 }
 
 // createInitSegment creates the initialization segment
 func (pm *PlaylistManager) createInitSegment(frames []*models.Frame) {
-	// Create a simple init segment
-	// In production, this would include proper MP4 headers (ftyp, moov boxes)
-	initData := []byte("fMP4 init segment placeholder")
+	// Find the first keyframe with SPS/PPS prepended
+	// Keyframes should have SPS/PPS at the beginning in Annex-B format
+	var initFrameData []byte
+	for _, frame := range frames {
+		if frame.IsVideo && frame.IsKeyFrame && len(frame.Payload) > 100 {
+			// This frame should have SPS/PPS prepended by the RTMP handler
+			// Use the first 1000 bytes which should contain SPS/PPS and start of frame
+			if len(frame.Payload) > 1000 {
+				initFrameData = frame.Payload[:1000]
+			} else {
+				initFrameData = frame.Payload
+			}
+			log.Printf("Using keyframe data for init segment: %d bytes", len(initFrameData))
+			break
+		}
+	}
+
+	if len(initFrameData) == 0 {
+		log.Printf("No keyframe found for init segment, using placeholder")
+		initData := []byte("fMP4 init segment placeholder")
+		path := fmt.Sprintf("%s/init.mp4", pm.streamKey)
+		pm.segmenter.storage.Write(path, initData)
+		return
+	}
+
+	// Use FFmpeg to create proper fMP4 init segment from real H.264 data
+	initData, err := pm.segmenter.muxer.CreateInitSegment(initFrameData, nil)
+	if err != nil {
+		log.Printf("Failed to create init segment for stream %s: %v", pm.streamKey, err)
+		// Fallback to placeholder
+		initData = []byte("fMP4 init segment placeholder")
+	}
 
 	path := fmt.Sprintf("%s/init.mp4", pm.streamKey)
 	if err := pm.segmenter.storage.Write(path, initData); err != nil {
@@ -274,7 +315,7 @@ func (pm *PlaylistManager) createInitSegment(frames []*models.Frame) {
 		return
 	}
 
-	log.Printf("Created init segment for stream %s", pm.streamKey)
+	log.Printf("Created init segment for stream %s (%d bytes)", pm.streamKey, len(initData))
 }
 
 // generatePlaylist generates the HLS playlist
@@ -287,6 +328,7 @@ func (pm *PlaylistManager) generatePlaylist() string {
 	// HLS playlist header
 	buf.WriteString("#EXTM3U\n")
 	buf.WriteString("#EXT-X-VERSION:7\n")
+	buf.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
 	buf.WriteString(fmt.Sprintf("#EXT-X-TARGETDURATION:%d\n", pm.targetDuration))
 
 	// Media sequence (first segment number in playlist)
@@ -298,11 +340,15 @@ func (pm *PlaylistManager) generatePlaylist() string {
 
 	// Map (init segment)
 	if pm.hasInit {
-		buf.WriteString(fmt.Sprintf("#EXT-X-MAP:URI=\"init.mp4\"\n"))
+		buf.WriteString("#EXT-X-MAP:URI=\"init.mp4\"\n")
 	}
 
 	// Segments
-	for _, seg := range pm.segments {
+	for i, seg := range pm.segments {
+		if i > 0 {
+			// Timestamp resets per fragment (ffmpeg per-segment) require a discontinuity marker
+			buf.WriteString("#EXT-X-DISCONTINUITY\n")
+		}
 		buf.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration))
 		buf.WriteString(fmt.Sprintf("segment_%d.m4s\n", seg.SequenceNum))
 	}
@@ -311,4 +357,3 @@ func (pm *PlaylistManager) generatePlaylist() string {
 
 	return buf.String()
 }
-
