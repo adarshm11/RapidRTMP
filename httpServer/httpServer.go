@@ -65,8 +65,7 @@ func (s *Server) setupRoutes() {
 	{
 		live.GET("/index.m3u8", s.handlePlaylist)
 		live.HEAD("/index.m3u8", s.handlePlaylist) // respond to HEAD for players that probe
-		live.GET("/init.mp4", s.handleInitSegment)
-		live.HEAD("/init.mp4", s.handleInitSegment)
+		// MPEG-TS doesn't need init segments - removed
 		live.GET("/:filename", s.handleMediaSegment)
 		live.HEAD("/:filename", s.handleMediaSegment)
 	}
@@ -148,6 +147,7 @@ func (s *Server) handleReady(c *gin.Context) {
 }
 
 func (s *Server) handlePing(c *gin.Context) {
+	c.Header("Access-Control-Allow-Origin", "*")
 	c.JSON(http.StatusOK, gin.H{
 		"message": "pong",
 		"time":    time.Now().Unix(),
@@ -255,8 +255,10 @@ func (s *Server) handleInitSegment(c *gin.Context) {
 		return
 	}
 
-	// Set caching headers (init segment can be cached longer)
-	c.Header("Cache-Control", "public, max-age=3600")
+	// Disable caching for init segment to ensure fresh data on stream restart
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
 	c.Header("Access-Control-Allow-Origin", "*")
 
 	c.Data(http.StatusOK, "video/mp4", initData)
@@ -266,14 +268,14 @@ func (s *Server) handleMediaSegment(c *gin.Context) {
 	streamKey := c.Param("streamKey")
 	filename := c.Param("filename")
 
-	// Only handle .m4s files
-	if len(filename) < 5 || filename[len(filename)-4:] != ".m4s" {
+	// Only handle .ts files
+	if len(filename) < 4 || filename[len(filename)-3:] != ".ts" {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 
-	// Remove .m4s extension
-	filename = filename[:len(filename)-4]
+	// Remove .ts extension
+	filename = filename[:len(filename)-3]
 
 	// Extract segment number from "segment_N"
 	if len(filename) < 9 || filename[:8] != "segment_" {
@@ -297,27 +299,17 @@ func (s *Server) handleMediaSegment(c *gin.Context) {
 		return
 	}
 
-	// If segment starts with full MP4 (ftyp/moov), trim to start at first moof box for fMP4 streaming
-	if len(segmentData) >= 12 {
-		// look for 'moof' (0x6d6f6f66)
-		moofTag := []byte{'m', 'o', 'o', 'f'}
-		if !(segmentData[4] == 'f' && segmentData[5] == 't' && segmentData[6] == 'y' && segmentData[7] == 'p') {
-			// not starting with ftyp; leave as-is
-		} else {
-			// scan for moof
-			idx := -1
-			for i := 8; i <= len(segmentData)-4; i++ {
-				if segmentData[i] == moofTag[0] && segmentData[i+1] == moofTag[1] && segmentData[i+2] == moofTag[2] && segmentData[i+3] == moofTag[3] {
-					idx = i
-					break
-				}
-			}
-			if idx > 4 {
-				// slice starting at size field preceding moof
-				start := idx - 4
-				if start >= 0 && start < len(segmentData) {
-					segmentData = segmentData[start:]
-				}
+	// If segment starts with full MP4 (ftyp/moov), trim to start at first moof box for CMAF streaming
+	if len(segmentData) >= 12 && segmentData[4] == 'f' && segmentData[5] == 't' && segmentData[6] == 'y' && segmentData[7] == 'p' {
+		// This is a full MP4 file, scan for 'moof' box
+		// MP4 boxes have format: [4 bytes size][4 bytes type][data]
+		// We're looking for a box with type 'moof'
+		for i := 8; i <= len(segmentData)-8; i++ {
+			// Check if this position has a box with type 'moof' at offset +4
+			if i+7 < len(segmentData) && segmentData[i+4] == 'm' && segmentData[i+5] == 'o' && segmentData[i+6] == 'o' && segmentData[i+7] == 'f' {
+				// Found moof box, trim to start from here
+				segmentData = segmentData[i:]
+				break
 			}
 		}
 	}
@@ -328,7 +320,7 @@ func (s *Server) handleMediaSegment(c *gin.Context) {
 	c.Header("Expires", "0")
 	c.Header("Access-Control-Allow-Origin", "*")
 
-	c.Data(http.StatusOK, "video/mp4", segmentData)
+	c.Data(http.StatusOK, "video/MP2T", segmentData)
 }
 
 // Helper functions

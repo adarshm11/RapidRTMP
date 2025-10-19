@@ -171,13 +171,13 @@ func PrependSPSPPSAnnexB(frameData []byte, sps, pps [][]byte) []byte {
 
 // ConvertAVCCFrameToAnnexB converts an AVCC frame (with the codec configuration) to Annex-B
 // This uses the NALUnitLength from the AVCC record to properly parse length-prefixed NALUs
-func ConvertAVCCFrameToAnnexB(frameData []byte, naluLength int) ([]byte, error) {
+func ConvertAVCCFrameToAnnexB(frameData []byte, naluLength int, skipSPSPPS ...bool) ([]byte, error) {
 	if naluLength != 4 {
 		// For now, we only support 4-byte length prefixes (most common)
 		// If needed, we can add support for 1, 2, or 3 byte lengths
 		log.Printf("Warning: NALU length size is %d, using default AVCC conversion", naluLength)
-		return ConvertAVCCToAnnexB(frameData)
+		return ConvertAVCCToAnnexB(frameData, skipSPSPPS...)
 	}
 
-	return ConvertAVCCToAnnexB(frameData)
+	return ConvertAVCCToAnnexB(frameData, skipSPSPPS...)
 }

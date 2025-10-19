@@ -263,6 +263,17 @@ func (h *ConnHandler) OnVideo(timestamp uint32, payload io.Reader) error {
 		return nil // Don't fail, just skip this packet
 	}
 
+	// DEBUG: Log first video packet details
+	h.mu.RLock()
+	hasSPS := len(h.sps) > 0
+	h.mu.RUnlock()
+	if !hasSPS {
+		// Log details of first few packets to debug OBS
+		log.Printf("[%s] First video packet: size=%d, isSeqHeader=%v, isKeyFrame=%v, avcDataSize=%d, header=[%02x %02x %02x %02x %02x]",
+			streamKey, n, isSequenceHeader, isKeyFrame, len(avcData),
+			videoData[0], videoData[1], videoData[2], videoData[3], videoData[4])
+	}
+
 	// Handle AVC sequence header (contains SPS/PPS)
 	if isSequenceHeader {
 		log.Printf("Received AVC sequence header for stream %s (%d bytes)", streamKey, len(avcData))
@@ -288,12 +299,20 @@ func (h *ConnHandler) OnVideo(timestamp uint32, payload io.Reader) error {
 		return nil
 	}
 
+	// For keyframes, we need to skip embedded SPS/PPS since we'll prepend our own
+	// OBS often embeds SPS/PPS at the start of every keyframe
+	skipSPSPPS := isKeyFrame
+	if skipSPSPPS {
+		log.Printf("[%s] Processing keyframe, will skip embedded SPS/PPS (avcData size=%d)", streamKey, len(avcData))
+	}
+
 	// Convert AVCC to Annex-B
-	annexBData, err := muxer.ConvertAVCCToAnnexB(avcData)
+	annexBData, err := muxer.ConvertAVCCToAnnexB(avcData, skipSPSPPS)
 	if err != nil {
-		log.Printf("Failed to convert AVCC to Annex-B: %v", err)
-		// Fall back to original data
-		annexBData = avcData
+		log.Printf("Failed to convert AVCC to Annex-B: %v (avcData size=%d, first 16 bytes=[% x])",
+			err, len(avcData), avcData[:min(16, len(avcData))])
+		// When conversion fails, skip this frame entirely to avoid corruption
+		return nil
 	}
 
 	// For keyframes, prepend SPS/PPS

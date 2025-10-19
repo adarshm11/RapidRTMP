@@ -27,17 +27,24 @@ func (m *FFmpegMuxer) CreateInitSegment(videoCodecData, audioCodecData []byte) (
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Use FFmpeg to create a minimal fMP4 init segment
-	// We'll feed it a tiny bit of data just to generate the headers
+	log.Printf("CreateInitSegment called with %d bytes of video codec data", len(videoCodecData))
+
+	if len(videoCodecData) == 0 {
+		return nil, fmt.Errorf("no video codec data provided")
+	}
+
+	// Use FFmpeg to create an fMP4 init segment by processing actual H.264 data
+	// videoCodecData should contain SPS/PPS and at least one frame in Annex-B format
 	cmd := exec.Command("ffmpeg",
+		"-hide_banner",
+		"-loglevel", "warning", // Show warnings and errors
 		"-f", "h264", // Input format
 		"-i", "pipe:0", // Read from stdin
-		"-c", "copy", // Don't re-encode
+		"-c:v", "copy", // Don't re-encode
 		"-f", "mp4", // Output format
-		// Create init with fragmented flags but without empty_moov in media segments
-		"-movflags", "frag_keyframe+separate_moof+default_base_moof", // CMAF-style init
+		"-movflags", "frag_keyframe+separate_moof+default_base_moof+empty_moov", // CMAF init with empty_moov
 		"-frag_duration", "1000000", // 1 second fragments in microseconds
-		"-t", "0.001", // Very short duration, we just want the init
+		"-frames:v", "1", // Only process 1 frame to get codec info
 		"pipe:1", // Write to stdout
 	)
 
@@ -54,20 +61,35 @@ func (m *FFmpegMuxer) CreateInitSegment(videoCodecData, audioCodecData []byte) (
 		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
-	// Write minimal H.264 data (just the codec data)
-	if len(videoCodecData) > 0 {
-		stdin.Write(videoCodecData)
-	}
+	// Write the H.264 data (should include SPS/PPS + one keyframe)
+	_, writeErr := stdin.Write(videoCodecData)
 	stdin.Close()
 
-	if err := cmd.Wait(); err != nil {
-		log.Printf("FFmpeg init segment stderr: %s", stderr.String())
-		// FFmpeg might return error due to very short duration, but still produce output
+	if writeErr != nil {
+		log.Printf("Warning: error writing to ffmpeg stdin: %v", writeErr)
+	}
+
+	waitErr := cmd.Wait()
+	stderrOutput := stderr.String()
+
+	if len(stderrOutput) > 0 {
+		log.Printf("FFmpeg init segment stderr: %s", stderrOutput)
+	}
+
+	if waitErr != nil {
+		log.Printf("FFmpeg init segment process error: %v", waitErr)
+		// Continue anyway - might have produced output
 	}
 
 	initData := stdout.Bytes()
 	if len(initData) == 0 {
-		return nil, fmt.Errorf("ffmpeg produced no output for init segment")
+		return nil, fmt.Errorf("ffmpeg produced no output for init segment (stderr: %s)", stderrOutput)
+	}
+
+	// The init should contain ftyp + moov boxes
+	// Check if it looks like valid MP4
+	if len(initData) < 100 {
+		return nil, fmt.Errorf("init segment too small (%d bytes), likely invalid", len(initData))
 	}
 
 	log.Printf("Created init segment: %d bytes", len(initData))
@@ -101,8 +123,8 @@ func (m *FFmpegMuxer) CreateMediaSegment(frames []*models.Frame) ([]byte, error)
 	framerate := "30" // Default, could be detected from timestamps
 	duration := fmt.Sprintf("%.3f", float64(len(videoFrames))/30.0)
 
-	// For now, we'll just mux video. Audio sync is more complex.
-	// Use FFmpeg to convert raw H.264 to fMP4
+	// Create MPEG-TS segments with video only for now
+	// TODO: Add audio support when needed
 	cmd := exec.Command("ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error", // Only show errors
@@ -111,13 +133,9 @@ func (m *FFmpegMuxer) CreateMediaSegment(frames []*models.Frame) ([]byte, error)
 		"-i", "pipe:0", // Read from stdin
 		"-t", duration, // Duration
 		"-c:v", "copy", // Don't re-encode
-		"-f", "mp4", // Output as MP4
-		// CMAF-style media fragments: moof+mdat only
-		"-movflags", "frag_keyframe+separate_moof+default_base_moof+dash+omit_tfhd_offset",
-		"-frag_duration", "1000000", // 1 second fragments in microseconds
-		"-min_frag_duration", "1000000",
-		"-reset_timestamps", "1", // Reset timestamps for each segment
-		"-avoid_negative_ts", "make_zero", // Handle timestamp issues
+		"-f", "mpegts", // Output as MPEG-TS
+		"-mpegts_copyts", "1", // Copy timestamps
+		"-mpegts_flags", "initial_discontinuity", // Mark as new segment
 		"-y",     // Overwrite output
 		"pipe:1", // Write to stdout
 	)
@@ -151,7 +169,7 @@ func (m *FFmpegMuxer) CreateMediaSegment(frames []*models.Frame) ([]byte, error)
 
 	// Wait for write to complete or error
 	if err := <-writeErr; err != nil {
-		log.Printf("Error writing frames to ffmpeg: %v", err)
+		log.Printf("Error writing video frames to ffmpeg: %v", err)
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -172,8 +190,53 @@ func (m *FFmpegMuxer) CreateMediaSegment(frames []*models.Frame) ([]byte, error)
 		return nil, fmt.Errorf("ffmpeg produced no output")
 	}
 
-	log.Printf("Created media segment: %d frames -> %d bytes", len(videoFrames), len(segmentData))
+	// MPEG-TS segments are ready to use - no stripping needed!
+	log.Printf("Created TS segment: %d frames -> %d bytes", len(videoFrames), len(segmentData))
 	return segmentData, nil
+}
+
+// stripInitBoxes removes ftyp and moov boxes from MP4 data, leaving only moof/mdat
+// This converts a full MP4 into a CMAF media segment
+func (m *FFmpegMuxer) stripInitBoxes(mp4Data []byte) []byte {
+	if len(mp4Data) < 8 {
+		return mp4Data
+	}
+
+	offset := 0
+	for offset+8 <= len(mp4Data) {
+		// Read box size and type
+		boxSize := int(mp4Data[offset])<<24 | int(mp4Data[offset+1])<<16 |
+			int(mp4Data[offset+2])<<8 | int(mp4Data[offset+3])
+		boxType := string(mp4Data[offset+4 : offset+8])
+
+		if boxSize == 0 || boxSize > len(mp4Data)-offset {
+			// Invalid or extended size, return from this point
+			return mp4Data[offset:]
+		}
+
+		// Skip ftyp, moov, and sidx boxes - only keep moof+mdat for CMAF
+		if boxType == "ftyp" || boxType == "moov" || boxType == "sidx" {
+			offset += boxSize
+			continue
+		}
+
+		// Found moof (start of fragment), return from here
+		if boxType == "moof" {
+			return mp4Data[offset:]
+		}
+
+		// If we hit mdat without moof, something's wrong - return from here
+		if boxType == "mdat" {
+			log.Printf("WARNING: Found mdat without moof at offset %d", offset)
+			return mp4Data[offset:]
+		}
+
+		// Unknown box, skip it
+		offset += boxSize
+	}
+
+	// No moof found, return original
+	return mp4Data
 }
 
 // MuxFramesToMP4 is a simpler interface that wraps CreateMediaSegment

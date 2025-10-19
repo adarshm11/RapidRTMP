@@ -111,7 +111,7 @@ func (s *Segmenter) GetPlaylist(streamKey string) (string, error) {
 
 // GetSegment returns a segment's data
 func (s *Segmenter) GetSegment(streamKey string, segmentNum uint64) ([]byte, error) {
-	path := fmt.Sprintf("%s/segment_%d.m4s", streamKey, segmentNum)
+	path := fmt.Sprintf("%s/segment_%d.ts", streamKey, segmentNum)
 	return s.storage.Read(path)
 }
 
@@ -213,7 +213,7 @@ func (pm *PlaylistManager) finalizeSegment() {
 	segmentData := pm.framesToSegmentData(frames)
 
 	// Save segment to storage
-	path := fmt.Sprintf("%s/segment_%d.m4s", pm.streamKey, segmentNum)
+	path := fmt.Sprintf("%s/segment_%d.ts", pm.streamKey, segmentNum)
 	if err := pm.segmenter.storage.Write(path, segmentData); err != nil {
 		log.Printf("Failed to write segment %d for stream %s: %v", segmentNum, pm.streamKey, err)
 		return
@@ -271,7 +271,40 @@ func (pm *PlaylistManager) framesToSegmentData(frames []*models.Frame) []byte {
 		return buf.Bytes()
 	}
 
+	// Modern HLS players can handle full MP4 segments with ftyp/moov boxes
 	return segmentData
+}
+
+// stripMP4HeaderBoxes removes ftyp and moov boxes, keeping only moof and mdat
+func stripMP4HeaderBoxes(data []byte) []byte {
+	if len(data) < 8 {
+		return data
+	}
+
+	// Simple approach: scan for 'moof' signature and return from there
+	// This avoids complex MP4 box parsing edge cases
+	moofSignature := []byte{'m', 'o', 'o', 'f'}
+
+	for i := 4; i < len(data)-4; i++ {
+		if data[i] == moofSignature[0] &&
+			data[i+1] == moofSignature[1] &&
+			data[i+2] == moofSignature[2] &&
+			data[i+3] == moofSignature[3] {
+			// Found 'moof', check if it's at a box type position (offset+4)
+			// The box size should be 4 bytes before this
+			if i >= 4 {
+				boxStart := i - 4
+				trimmedSize := len(data) - boxStart
+				log.Printf("stripMP4HeaderBoxes: Found moof at offset %d, trimming %d -> %d bytes",
+					boxStart, len(data), trimmedSize)
+				return data[boxStart:]
+			}
+		}
+	}
+
+	// If no moof found, return original data
+	log.Printf("stripMP4HeaderBoxes: No moof found, returning original %d bytes", len(data))
+	return data
 }
 
 // createInitSegment creates the initialization segment
@@ -282,12 +315,8 @@ func (pm *PlaylistManager) createInitSegment(frames []*models.Frame) {
 	for _, frame := range frames {
 		if frame.IsVideo && frame.IsKeyFrame && len(frame.Payload) > 100 {
 			// This frame should have SPS/PPS prepended by the RTMP handler
-			// Use the first 1000 bytes which should contain SPS/PPS and start of frame
-			if len(frame.Payload) > 1000 {
-				initFrameData = frame.Payload[:1000]
-			} else {
-				initFrameData = frame.Payload
-			}
+			// Use the full keyframe to ensure FFmpeg has enough data
+			initFrameData = frame.Payload
 			log.Printf("Using keyframe data for init segment: %d bytes", len(initFrameData))
 			break
 		}
@@ -338,19 +367,13 @@ func (pm *PlaylistManager) generatePlaylist() string {
 		buf.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	}
 
-	// Map (init segment)
-	if pm.hasInit {
-		buf.WriteString("#EXT-X-MAP:URI=\"init.mp4\"\n")
-	}
+	// MPEG-TS doesn't need an init segment (EXT-X-MAP)
+	// Each .ts segment is self-contained with PAT/PMT tables
 
 	// Segments
-	for i, seg := range pm.segments {
-		if i > 0 {
-			// Timestamp resets per fragment (ffmpeg per-segment) require a discontinuity marker
-			buf.WriteString("#EXT-X-DISCONTINUITY\n")
-		}
+	for _, seg := range pm.segments {
 		buf.WriteString(fmt.Sprintf("#EXTINF:%.3f,\n", seg.Duration))
-		buf.WriteString(fmt.Sprintf("segment_%d.m4s\n", seg.SequenceNum))
+		buf.WriteString(fmt.Sprintf("segment_%d.ts\n", seg.SequenceNum))
 	}
 
 	// Note: We don't add #EXT-X-ENDLIST because it's a live stream

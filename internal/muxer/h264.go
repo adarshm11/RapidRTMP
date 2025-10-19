@@ -32,14 +32,19 @@ var (
 // Annex-B format (used by raw H.264 streams, MPEG-TS):
 //
 //	[0x00 0x00 0x00 0x01][NAL unit][0x00 0x00 0x00 0x01][NAL unit]...
-func ConvertAVCCToAnnexB(avccData []byte) ([]byte, error) {
+//
+// skipSPSPPS: if true, skip SPS/PPS NAL units (useful when they're prepended separately)
+func ConvertAVCCToAnnexB(avccData []byte, skipSPSPPS ...bool) ([]byte, error) {
 	if len(avccData) == 0 {
 		return nil, fmt.Errorf("empty AVCC data")
 	}
 
+	skipConfig := len(skipSPSPPS) > 0 && skipSPSPPS[0]
+
 	var annexB bytes.Buffer
 	offset := 0
 	nalCount := 0
+	skippedSPSPPS := 0
 
 	for offset < len(avccData) {
 		// Need at least 4 bytes for length prefix
@@ -58,6 +63,14 @@ func ConvertAVCCToAnnexB(avccData []byte) ([]byte, error) {
 		}
 
 		if offset+int(nalSize) > len(avccData) {
+			// Log more details about the failure
+			log.Printf("AVCC parse failed: nalSize=%d, offset=%d, bufferSize=%d, remaining=%d",
+				nalSize, offset-4, len(avccData), len(avccData)-offset)
+			if nalCount > 0 {
+				// Return what we have so far instead of failing completely
+				log.Printf("Returning partial conversion: %d NAL units successfully parsed", nalCount)
+				return annexB.Bytes(), nil
+			}
 			return nil, fmt.Errorf("invalid NAL size %d at offset %d (exceeds buffer)", nalSize, offset-4)
 		}
 
@@ -67,6 +80,12 @@ func ConvertAVCCToAnnexB(avccData []byte) ([]byte, error) {
 
 		// Get NAL unit type (lower 5 bits of first byte)
 		nalType := nalUnit[0] & 0x1F
+
+		// Skip SPS/PPS if requested (they're often embedded in keyframes by OBS)
+		if skipConfig && (nalType == NALUnitTypeSPS || nalType == NALUnitTypePPS) {
+			skippedSPSPPS++
+			continue
+		}
 
 		// Write start code (use 4-byte for SPS/PPS/IDR, 3-byte for others)
 		if nalType == NALUnitTypeSPS || nalType == NALUnitTypePPS || nalType == NALUnitTypeIDR {
@@ -81,12 +100,20 @@ func ConvertAVCCToAnnexB(avccData []byte) ([]byte, error) {
 	}
 
 	if nalCount == 0 {
+		if skippedSPSPPS > 0 {
+			return nil, fmt.Errorf("only SPS/PPS found in AVCC data (all %d NAL units were config)", skippedSPSPPS)
+		}
 		return nil, fmt.Errorf("no NAL units found in AVCC data")
 	}
 
 	result := annexB.Bytes()
-	log.Printf("Converted AVCC to Annex-B: %d bytes -> %d bytes (%d NAL units)",
-		len(avccData), len(result), nalCount)
+	if skippedSPSPPS > 0 {
+		log.Printf("Converted AVCC to Annex-B: %d bytes -> %d bytes (%d NAL units, skipped %d SPS/PPS)",
+			len(avccData), len(result), nalCount, skippedSPSPPS)
+	} else {
+		log.Printf("Converted AVCC to Annex-B: %d bytes -> %d bytes (%d NAL units)",
+			len(avccData), len(result), nalCount)
+	}
 
 	return result, nil
 }

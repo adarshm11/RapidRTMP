@@ -304,23 +304,46 @@
 
             if (Hls.isSupported()) {
                 if (hls) {
+                    console.log('Destroying old HLS instance');
                     hls.destroy();
+                    hls = null;
                 }
 
+                console.log('Creating new HLS instance');
                 hls = new Hls({
-                    debug: true,
-                    enableWorker: true,
-                    lowLatencyMode: false,
-                    liveSyncDurationCount: 3,
-                    liveMaxLatencyDurationCount: 10,
-                    maxLiveSyncPlaybackRate: 1.5,
-                    backBufferLength: 30,
-                    maxBufferLength: 30,
-                    nudgeMaxRetry: 10
+                    debug: false,  // Disable debug to reduce noise
+                    enableWorker: false,
+                    lowLatencyMode: true,  // Enable low latency mode for live
+                    startPosition: -1,
+                    liveSyncDurationCount: 2,  // Stay closer to live edge (2 segments)
+                    liveMaxLatencyDurationCount: 6,  // Max 6 segments behind
+                    maxLiveSyncPlaybackRate: 1.2,  // Speed up slightly to catch up
+                    backBufferLength: 10,  // Keep less back buffer (10s)
+                    maxBufferLength: 20,  // Target buffer length (20s)
+                    maxBufferSize: 60 * 1000 * 1000,  // 60MB max
+                    maxBufferHole: 0.5,  // Jump over small gaps
+                    highBufferWatchdogPeriod: 1,  // Check buffer health every 1s
+                    nudgeMaxRetry: 10,
+                    manifestLoadingTimeOut: 10000,
+                    levelLoadingTimeOut: 10000,
+                    fragLoadingTimeOut: 20000
                 });
 
-                hls.loadSource(streamUrl);
+                console.log('Attaching media');
                 hls.attachMedia(video);
+                
+                console.log('Loading source:', streamUrl);
+                hls.loadSource(streamUrl);
+                
+                // Force start after a short delay
+                setTimeout(() => {
+                    console.log('Force starting load after 2 seconds');
+                    try {
+                        hls.startLoad(0);
+                    } catch(e) {
+                        console.error('startLoad failed:', e);
+                    }
+                }, 2000);
 
                 // Help autoplay and recovery
                 video.addEventListener('canplay', function() {
@@ -346,16 +369,63 @@
                 });
 
                 hls.on(Hls.Events.MEDIA_ATTACHED, function() {
-                    // Start from live edge
-                    try { hls.startLoad(-1); } catch (e) {}
+                    console.log('✓ MEDIA_ATTACHED');
                 });
 
-                hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                    document.getElementById('playerStatus').innerHTML = '<span class="live">✓ Playing</span>';
-                    video.play().catch(e => {
-                        console.error('Play failed:', e);
-                        document.getElementById('playerStatus').innerHTML = '<span class="offline">✗ Play failed (click video to play)</span>';
-                    });
+                hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
+                    console.log('✓ MANIFEST_PARSED - levels:', data.levels.length);
+                    document.getElementById('playerStatus').innerHTML = '<span class="live">✓ Manifest loaded</span>';
+                    
+                    // Aggressively force loading immediately
+                    console.log('Forcing immediate load from MANIFEST_PARSED');
+                    setTimeout(() => {
+                        console.log('Starting load with position 0');
+                        hls.startLoad(0);
+                        setTimeout(() => {
+                            console.log('Attempting play');
+                            video.play().catch(e => console.error('Play failed:', e));
+                        }, 100);
+                    }, 100);
+                });
+
+                let levelLoadCount = 0;
+                hls.on(Hls.Events.LEVEL_LOADED, function(event, data) {
+                    levelLoadCount++;
+                    console.log('✓ LEVEL_LOADED #' + levelLoadCount + ' - segment count:', data.details.fragments.length);
+                    
+                    // Emergency: if 5 level loads and still no fragments loading, force it
+                    if (levelLoadCount === 5) {
+                        console.warn('⚠️ Emergency: 5 level loads, no fragments. Force loading from first segment');
+                        try {
+                            // Get the first segment from the level details
+                            const firstFrag = data.details.fragments[0];
+                            if (firstFrag) {
+                                console.log('First segment SN:', firstFrag.sn, 'start:', firstFrag.start);
+                                hls.startLoad(firstFrag.start);
+                            } else {
+                                hls.startLoad(0);
+                            }
+                        } catch (e) {
+                            console.error('Emergency load failed:', e);
+                        }
+                    }
+                });
+
+                hls.on(Hls.Events.FRAG_LOADING, function(event, data) {
+                    console.log('✓ FRAG_LOADING - sn:', data.frag.sn);
+                });
+
+                hls.on(Hls.Events.FRAG_LOADED, function(event, data) {
+                    console.log('✓ FRAG_LOADED - sn:', data.frag.sn, 'size:', data.payload.byteLength);
+                });
+
+                hls.on(Hls.Events.BUFFER_APPENDING, function(event, data) {
+                    console.log('✓ BUFFER_APPENDING - type:', data.type, 'size:', data.data.byteLength);
+                });
+
+                hls.on(Hls.Events.BUFFER_APPENDED, function(event, data) {
+                    console.log('✓ BUFFER_APPENDED');
+                    video.play().catch(() => {});
                 });
 
                 hls.on(Hls.Events.ERROR, function(event, data) {
